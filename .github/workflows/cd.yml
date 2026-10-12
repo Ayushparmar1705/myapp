@@ -3,30 +3,36 @@ name: CD - Deploy to EC2
 on:
   workflow_run:
     workflows:
-      - "CI - Build & Push Docker Image"
+      - "CI - Build and Push Docker Image"
     types:
       - completed
     branches:
       - main
+
+  workflow_dispatch:
 
 jobs:
   deploy:
     name: Deploy Docker Image to EC2
 
     if: >-
-      github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.head_branch == 'main'
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_branch == 'main'
+      )
 
     runs-on: ubuntu-latest
 
     steps:
       - name: Deploy to EC2
         uses: appleboy/ssh-action@v1.2.2
+
         env:
           DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
           DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
           IMAGE: ${{ secrets.DOCKER_USERNAME }}/myapp
-          TAG: ${{ github.event.workflow_run.head_sha }}
+          TAG: ${{ github.event.workflow_run.head_sha || github.sha }}
 
         with:
           host: ${{ secrets.HOST_DNS }}
@@ -37,47 +43,52 @@ jobs:
           script: |
             set -eu
 
-            # Install Docker and Apache if needed
+            echo "Checking Docker installation..."
+
             if ! command -v docker >/dev/null 2>&1; then
-              sudo apt-get update -y
+              echo "Docker not found. Installing Docker..."
+
+              sudo apt-get update
               sudo apt-get install -y docker.io
             fi
 
-            if ! command -v apache2 >/dev/null 2>&1; then
-              sudo apt-get update -y
-              sudo apt-get install -y apache2
-            fi
-
-            # Enable required services
             sudo systemctl enable --now docker
-            sudo systemctl enable --now apache2
 
-            # Login to Docker Hub
+            echo "Docker version:"
+            sudo docker --version
+
+            echo "Logging in to Docker Hub..."
+
             echo "$DOCKER_PASSWORD" | sudo docker login \
               --username "$DOCKER_USERNAME" \
               --password-stdin
 
-            # Pull the image created by CI
             echo "Pulling image: $IMAGE:$TAG"
+
             sudo docker pull "$IMAGE:$TAG"
 
-            # Remove the old container
+            echo "Removing previous container..."
+
             sudo docker rm -f myapp 2>/dev/null || true
 
-            # Run the updated application
+            echo "Starting new container..."
+
             sudo docker run -d \
               --restart unless-stopped \
               --name myapp \
               -p 8080:80 \
               "$IMAGE:$TAG"
 
-            # Restart Apache
-            sudo systemctl restart apache2
+            echo "Checking running container..."
 
-            # Verify the container
             sudo docker ps --filter "name=myapp"
 
-            # Logout from Docker Hub
+            echo "Removing unused Docker images..."
+
+            sudo docker image prune -f
+
+            echo "Logging out from Docker Hub..."
+
             sudo docker logout
 
             echo "Deployment completed successfully."
